@@ -1,0 +1,18 @@
+Traceback (most recent call last):
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/main.py", line 26, in <module>
+    main()
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/main.py", line 17, in main
+    model = train_model(device=device, quick=(not args.full))
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/train.py", line 133, in train_model
+    model = TinyGPT().to(device)
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/train.py", line 89, in __init__
+    self.blocks = nn.ModuleList([TinyTransformerBlock(d_model) for _ in range(layers)])
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/train.py", line 89, in <listcomp>
+    self.blocks = nn.ModuleList([TinyTransformerBlock(d_model) for _ in range(layers)])
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/train.py", line 66, in __init__
+    HierarchicalCodebookLinear(d_model, d_model * mlp_ratio),
+  File "/home/runner/work/tanaka-20250811/tanaka-20250811/src/train.py", line 36, in __init__
+    self.main_index = nn.Parameter(torch.randint(-2, 3, (out_features, in_features), dtype=torch.int8))
+  File "/home/runner/work/_tool/Python/3.10.18/x64/lib/python3.10/site-packages/torch/nn/parameter.py", line 46, in __new__
+    return torch.Tensor._make_subclass(cls, data, requires_grad)
+RuntimeError: Only Tensors of floating point and complex dtype can require gradients

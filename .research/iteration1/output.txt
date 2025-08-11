@@ -1,0 +1,4 @@
+Using device: cuda
+
+=== TRAINING PHASE ===
+Starting training...
