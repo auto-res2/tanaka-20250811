@@ -1,31 +1,40 @@
-import os
-import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import time
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import seaborn as sns
-from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 
-# Ensure required directories exist
-MODEL_DIR = os.path.join(os.getcwd(), 'models')
-IMAGE_DIR = os.path.join(os.getcwd(), '.research', 'iteration1', 'images')
-DATA_DIR = os.path.join(os.getcwd(), 'data')
-for d in [MODEL_DIR, IMAGE_DIR, DATA_DIR]:
-    os.makedirs(d, exist_ok=True)
+# Import dataloader from preprocess module
+from preprocess import get_toy_dataloaders
 
-# -----------------------------
-# Model and Helper Definitions
-# -----------------------------
+
+def fake_quantise(x: torch.Tensor, bits: int, symmetric: bool = True):
+    """Uniform quantisation with STE backward (for ≤8 bits)."""
+    qmin = -(2 ** (bits - 1)) if symmetric else 0
+    qmax = (2 ** (bits - 1)) - 1 if symmetric else (2 ** bits) - 1
+    scale = x.detach().abs().max() / qmax + 1e-8
+    
+    def _quantise(y):
+        y_div = y / scale
+        y_clamped = y_div.clamp(qmin, qmax).round()
+        return y_clamped * scale
+    
+    # STE: forward uses quantised value, backward uses identity
+    return _quantise(x) + (x - _quantise(x)).detach()
+
 
 class HierarchicalCodebookLinear(nn.Module):
-    """Linear layer with 2-bit main + 1-bit residue (3 effective bits)."""
+    """Linear layer with 2-bit main indices and 1-bit residue (total 3 effective bits)."""
 
-    def __init__(self, in_f: int, out_f: int):
+    def __init__(self, in_features, out_features):
         super().__init__()
-        self.main_index = nn.Parameter(torch.randint(-2, 3, (out_f, in_f), dtype=torch.int8))
-        self.residue_index = nn.Parameter(torch.randint(-1, 2, (out_f, in_f), dtype=torch.int8))
+        # Store indices instead of full weights
+        self.main_index = nn.Parameter(torch.randint(-2, 3, (out_features, in_features), dtype=torch.int8))
+        self.residue_index = nn.Parameter(torch.randint(-1, 2, (out_features, in_features), dtype=torch.int8))
         self.scale = nn.Parameter(torch.full((1,), 1e-1))
 
     def forward(self, x):
@@ -33,8 +42,9 @@ class HierarchicalCodebookLinear(nn.Module):
         w = w_int * self.scale
         return F.linear(x, w)
 
+
 class RA_LayerNorm(nn.Module):
-    """Range-Aware Residual LayerNorm (RA-RLN) – tiny variant."""
+    """Range-Aware Residual LayerNorm – tiny variant."""
 
     def __init__(self, dim):
         super().__init__()
@@ -44,8 +54,9 @@ class RA_LayerNorm(nn.Module):
     def forward(self, x):
         return self.ln(x + self.beta)
 
+
 class TinyTransformerBlock(nn.Module):
-    """A 2-head miniature transformer block."""
+    """A tiny transformer block incorporating our quantisation modules."""
 
     def __init__(self, d_model=64, n_heads=2, mlp_ratio=4):
         super().__init__()
@@ -67,8 +78,9 @@ class TinyTransformerBlock(nn.Module):
         x = self.ra_ln2(x)
         return x
 
+
 class TinyGPT(nn.Module):
-    """GPT-like toy model – suitable for quick training tests."""
+    """A GPT-like toy model (~100K parameters) for quick experiments."""
 
     def __init__(self, vocab_size=256, seq_len=32, layers=2, d_model=64):
         super().__init__()
@@ -79,6 +91,7 @@ class TinyGPT(nn.Module):
         self.head = nn.Linear(d_model, vocab_size)
 
     def forward(self, idx):
+        # idx shape: [batch, seq_len]
         x = self.emb(idx) + self.pos[:idx.size(1)]
         for blk in self.blocks:
             x = blk(x)
@@ -87,34 +100,12 @@ class TinyGPT(nn.Module):
         return logits
 
 
-def fake_quantise(x: torch.Tensor, bits: int, symmetric: bool = True):
-    """Uniform quantisation with STE backward (for ≤8 bits)."""
-    qmin = -(2 ** (bits - 1)) if symmetric else 0
-    qmax = (2 ** (bits - 1)) - 1 if symmetric else 2 ** bits - 1
-    scale = x.detach().abs().max() / qmax + 1e-8
-
-    def _quantise(y):
-        y_div = y / scale
-        y_clamped = y_div.clamp(qmin, qmax).round()
-        return y_clamped * scale
-
-    return _quantise(x) + (x - _quantise(x)).detach()
-
-
-def make_toy_dataloader(seq_len=32, vocab=256, num_tokens=10000, batch_size=16):
-    """Generate toy data loader from synthetic data."""
-    torch.manual_seed(0)
-    data = torch.randint(0, vocab, (num_tokens,))
-    x = data.unfold(0, seq_len, seq_len)[:-1]
-    y = data.unfold(0, seq_len, seq_len)[1:]
-    ds = TensorDataset(x, y)
-    return DataLoader(ds, batch_size=batch_size, shuffle=True)
-
-
 def train_one_epoch(model, loader, opt, device, max_steps=100, bits_act=8):
     model.train()
-    total_loss, n = 0.0, 0
+    total_loss = 0.0
+    n = 0
     start = time.time()
+    
     for step, (x, y) in enumerate(loader):
         if step >= max_steps:
             break
@@ -123,48 +114,60 @@ def train_one_epoch(model, loader, opt, device, max_steps=100, bits_act=8):
         if bits_act < 8:
             logits = fake_quantise(logits, bits_act)
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        opt.zero_grad(set_to_none=True)
+        opt.zero_grad()
         loss.backward()
         opt.step()
         total_loss += loss.item()
         n += 1
-    return total_loss / n
+        print(f"Training step {step}: Loss = {loss.item():.4f}")
+    
+    elapsed = time.time() - start
+    tok_s = (n * x.numel()) / elapsed
+    return total_loss / n, tok_s
 
 
-def train_model(quick=True):
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"Training on device: {device}")
-    # Use toy data loader; alternatively load from preprocessed data
-    loader = make_toy_dataloader(batch_size=16)
+def train_model(device="cpu", quick=True):
+    print("Starting training...")
+    loader = get_toy_dataloaders(batch_size=16)
+    torch.manual_seed(0)
     model = TinyGPT().to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=5e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.005)
     steps = 30 if quick else 200
     loss_curve = []
+
     for step in range(steps):
-        # For curriculum: use full precision activations first, then drop bits later
+        # Quick curriculum: use full precision activations at first, then drop to 4-bit quantisation
         bits_a = 8 if step < steps // 2 else 4
-        loss = train_one_epoch(model, loader, opt, device, max_steps=1, bits_act=bits_a)
+        loss, tok_s = train_one_epoch(model, loader, optimizer, device, max_steps=1, bits_act=bits_a)
         loss_curve.append(loss)
-        print(f"Step {step+1}/{steps} - Loss: {loss:.4f}")
-
-    # Save model
-    model_path = os.path.join(MODEL_DIR, 'model.pt')
-    torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
-
-    # Plot training loss curve
-    sns.set(style='whitegrid')
-    plt.figure(figsize=(4,3))
-    plt.plot(loss_curve, label='training loss')
-    plt.xlabel('Step')
-    plt.ylabel('Loss')
+    
+    # Save the trained model
+    model_dir = Path("models")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), model_dir / "tinygpt.pt")
+    print("Training completed. Model saved to models/tinygpt.pt")
+    
+    # Save training loss plot in high-quality PDF
+    image_dir = Path(".research/iteration1/images")
+    image_dir.mkdir(parents=True, exist_ok=True)
+    sns.set(style="whitegrid")
+    plt.figure(figsize=(4, 3))
+    plt.plot(loss_curve, label="Training Loss")
+    plt.xlabel("Step")
+    plt.ylabel("Loss")
     plt.legend()
     plt.tight_layout()
-    plot_path = os.path.join(IMAGE_DIR, 'training_loss.pdf')
-    plt.savefig(plot_path, bbox_inches='tight')
-    print(f"Training loss plot saved to {plot_path}")
+    plt.savefig(image_dir / "training_loss.pdf", bbox_inches="tight")
+    plt.close()
+    print(f"Training loss plot saved to {image_dir / 'training_loss.pdf'}")
     
     return model
 
-if __name__ == '__main__':
-    train_model(quick=True)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Train TinyGPT toy model")
+    parser.add_argument("--full", action="store_true", help="Run full training (longer run)")
+    args = parser.parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    train_model(device=device, quick=(not args.full))
