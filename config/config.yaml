@@ -1,0 +1,26 @@
+# Configuration parameters for GNTQ-EFD++ experiments
+
+learning_rate: 0.005
+batch_size: 16
+seq_len: 32
+vocab_size: 256
+num_tokens: 10000
+num_layers: 2
+model_dim: 64
+mlp_ratio: 4
+training_steps_quick: 30
+training_steps_full: 200
+quantisation:
+  weights_bits: 3
+  activations_bits: 4
+
+experiment:
+  preprocess: true
+  train: true
+  evaluate: true
+
+# Paths
+paths:
+  data: ./data
+  models: ./models
+  images: ./.research/iteration1/images
